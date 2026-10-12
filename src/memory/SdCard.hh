@@ -12,6 +12,7 @@
 namespace openmsx {
 
 class DeviceConfig;
+class DiskManipulator;
 class HD;
 
 class SdCard
@@ -41,6 +42,7 @@ private:
 
 private:
 	const std::unique_ptr<HD> hd; // can be nullptr
+	DiskManipulator* diskManipulator = nullptr; // set when hd is: the card is reachable as hdX
 
 	std::array<uint8_t, 6> cmdBuf;
 	SectorBuffer sectorBuf;

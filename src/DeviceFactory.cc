@@ -73,6 +73,7 @@
 #include "ProgrammableDevice.hh"
 #include "RomFactory.hh"
 #include "SC3000PPI.hh"
+#include "SDMapperV2.hh"
 #include "SG1000JoystickIO.hh"
 #include "SG1000Pause.hh"
 #include "SNPSG.hh"
@@ -260,6 +261,8 @@ std::unique_ptr<MSXDevice> DeviceFactory::create(DeviceConfig& conf)
 		result = std::make_unique<SunriseIDE>(conf);
 	} else if (type == "UnapiNet") {
 		result = std::make_unique<UnapiNet>(conf);
+	} else if (type == "SDMapperV2") {
+		result = std::make_unique<SDMapperV2>(conf);
 	} else if (type == "GoudaSCSI") {
 		result = std::make_unique<GoudaSCSI>(conf);
 	} else if (type == "MegaSCSI") {

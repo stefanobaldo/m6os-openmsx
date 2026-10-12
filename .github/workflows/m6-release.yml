@@ -1,0 +1,81 @@
+name: m6 release
+
+# The build of the m6 branch: openMSX 21.0 with the FBLabs SD Mapper V2
+# device. A push to the branch builds the two binaries m6's test harness
+# runs; a tag m6-* builds them and publishes a release with both.
+
+on:
+  push:
+    branches:
+      - m6
+    tags:
+      - 'm6-*'
+
+jobs:
+  build:
+    name: ${{ matrix.name }} ${{ matrix.cpu }}
+    runs-on: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu-latest
+            name: Linux
+            cpu: x86_64
+            os: linux
+            flavour: opt
+          - image: macos-15
+            xcode_version: 16.4
+            name: MacOS
+            cpu: aarch64
+            os: darwin
+            flavour: opt
+    steps:
+    - name: Get current code from Git repo
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - name: Select Xcode version
+      if: ${{ matrix.xcode_version }}
+      run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
+    - name: Perform the actual build
+      uses: ./.github/actions/build
+      with:
+        os: ${{ matrix.os }}
+        cpu: ${{ matrix.cpu }}
+        flavour: ${{ matrix.flavour }}
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/m6-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download the build artifacts
+      uses: actions/download-artifact@v5
+      with:
+        path: artifacts
+    - name: Package the Linux build as the release zip
+      run: |
+        set -e
+        cd artifacts
+        for d in openmsx-*-linux-x86_64-bin.zip; do
+          [ -d "$d" ] || continue
+          name=${d%.zip}
+          mv "$d" "$name"
+          # The artifact loses the executable bit, and the zip carries
+          # bin/ and share/ at its root, as upstream's does.
+          chmod +x "$name/bin/openmsx"
+          (cd "$name" && zip -qr "../$d" .)
+        done
+        ls -la
+    - name: Create the release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          artifacts/openmsx-*-linux-x86_64-bin.zip
+          artifacts/*.dmg/*.dmg
+          artifacts/openmsx-*-mac-aarch64-bin.dmg
+        fail_on_unmatched_files: false

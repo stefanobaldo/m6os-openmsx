@@ -279,6 +279,9 @@ void SdCard::executeCommand()
 		responseQueue.push_back(R1_IDLE); // R1 (OK)
 		mode = COMMAND;
 		break;
+	case 23: // SET_BLOCK_COUNT / ACMD23 SET_WR_BLK_ERASE_COUNT
+		responseQueue.push_back(R1_BUSY); // OK
+		break;
 	case 16: // SET_BLOCK_LEN
 		responseQueue.push_back(R1_IDLE); // OK, we don't really care
 		break;

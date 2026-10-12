@@ -1,6 +1,10 @@
 #include "SdCard.hh"
 #include "DeviceConfig.hh"
+#include "DiskManipulator.hh"
 #include "HD.hh"
+#include "MSXMotherBoard.hh"
+#include "Reactor.hh"
+#include "strCat.hh"
 #include "MSXException.hh"
 #include "unreachable.hh"
 #include "endian.hh"
@@ -38,6 +42,13 @@ static constexpr uint8_t R1_PARAMETER_ERROR = 0x80;
 SdCard::SdCard(const DeviceConfig& config)
 	: hd(config.getXML() ? std::make_unique<HD>(config) : nullptr)
 {
+	if (hd) {
+		// as IDEHD does: the card's image is a drive the diskmanipulator
+		// command can import into and export from
+		diskManipulator = &config.getReactor().getDiskManipulator();
+		diskManipulator->registerDrive(
+			*hd, tmpStrCat(config.getMotherBoard().getMachineID(), "::"));
+	}
 }
 
 bool SdCard::isWriteProtected() const
@@ -45,7 +56,10 @@ bool SdCard::isWriteProtected() const
 	return hd && hd->isWriteProtected();
 }
 
-SdCard::~SdCard() = default;
+SdCard::~SdCard()
+{
+	if (diskManipulator) diskManipulator->unregisterDrive(*hd);
+}
 
 // helper methods for 'transfer' to avoid duplication
 uint8_t SdCard::readCurrentByteFromCurrentSector()

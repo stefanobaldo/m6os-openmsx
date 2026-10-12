@@ -39,9 +39,26 @@ static constexpr uint8_t R1_IDLE            = 0x01; // TODO: why is lots of code
 static constexpr uint8_t R1_ILLEGAL_COMMAND = 0x04;
 static constexpr uint8_t R1_PARAMETER_ERROR = 0x80;
 
+// <type>SDHC</type> (the default) or <type>SDSC</type>: a standard-capacity
+// card of the first SD version, which answers CMD8 with "illegal command",
+// reports a version-1 CSD and no CCS, and takes a byte address in the
+// transfer commands. Its image is at most 1 GB (READ_BL_LEN 9, C_SIZE_MULT 7).
+static bool readIsSdhc(const DeviceConfig& config)
+{
+	if (!config.getXML()) return true;
+	auto type = config.getChildData("type", "SDHC");
+	if (type == "SDHC") return true;
+	if (type == "SDSC") return false;
+	throw MSXException("Unknown SD card type: ", type, " (expected SDHC or SDSC)");
+}
+
 SdCard::SdCard(const DeviceConfig& config)
 	: hd(config.getXML() ? std::make_unique<HD>(config) : nullptr)
+	, sdhc(readIsSdhc(config))
 {
+	if (hd && !sdhc && (hd->getNbSectors() > (1024 * 1024 * 1024 / 512))) {
+		throw MSXException("An SDSC card image must be at most 1 GB.");
+	}
 	if (hd) {
 		// as IDEHD does: the card's image is a drive the diskmanipulator
 		// command can import into and export from
@@ -237,6 +254,11 @@ void SdCard::executeCommand()
 		responseQueue.push_back(R1_IDLE);
 		break;
 	case 8:  // SEND_IF_COND
+		if (!sdhc) {
+			// a version-1 card does not know the command
+			responseQueue.push_back(R1_IDLE | R1_ILLEGAL_COMMAND);
+			break;
+		}
 		// conditions are always OK
 		responseQueue.push_back({
 			R1_IDLE,    // R1 (OK) SDHC (checked by MegaSD and FUZIX)
@@ -246,6 +268,31 @@ void SdCard::executeCommand()
 			cmdBuf[4]});// check pattern
 		break;
 	case 9:{ // SEND_CSD
+		if (!sdhc) {
+			// CSD version 1.0: capacity = (C_SIZE + 1) * 2^(C_SIZE_MULT + 2) * 2^READ_BL_LEN
+			// with READ_BL_LEN = 9 and C_SIZE_MULT = 7, (C_SIZE + 1) * 512 sectors
+			auto c_size = narrow<uint32_t>(hd->getNbSectors() / 512 - 1);
+			responseQueue.push_back({
+				R1_BUSY,
+				START_BLOCK_TOKEN,
+				uint8_t(0x00),   // CSD_STRUCTURE 0 (version 1.0), reserved
+				uint8_t(0x26),   // TAAC
+				uint8_t(0x00),   // NSAC
+				uint8_t(0x32),   // TRAN_SPEED
+				uint8_t(0x5B),   // CCC [11:4]
+				uint8_t(0x59),   // CCC [3:0], READ_BL_LEN = 9
+				uint8_t(0x80 | ((c_size >> 10) & 0x03)), // READ_BL_PARTIAL, C_SIZE [11:10]
+				uint8_t((c_size >> 2) & 0xFF),           // C_SIZE [9:2]
+				uint8_t((c_size & 0x03) << 6),           // C_SIZE [1:0], VDD_R_CURR
+				uint8_t(0x03),   // VDD_W_CURR, C_SIZE_MULT [2:1] = 11b
+				uint8_t(0xFF),   // C_SIZE_MULT [0] = 1, ERASE_BLK_EN, SECTOR_SIZE
+				uint8_t(0x80),   // SECTOR_SIZE, WP_GRP_SIZE
+				uint8_t(0x0A),   // R2W_FACTOR, WRITE_BL_LEN [3:2]
+				uint8_t(0x40),   // WRITE_BL_LEN [1:0] = 9
+				uint8_t(0x00),   // FILE_FORMAT, COPY, PERM_WP, TMP_WP
+				uint8_t(0x01)}); // CRC / 1
+			break;
+		}
 		responseQueue.push_back({
 			R1_BUSY, // OK (ignored on MegaSD code, used in FUZIX)
 		// now follows a CSD version 2.0 (for SDHC)
@@ -299,14 +346,29 @@ void SdCard::executeCommand()
 		responseQueue.push_back(R1_BUSY); // OK
 		break;
 	case 16: // SET_BLOCK_LEN
-		responseQueue.push_back(R1_IDLE); // OK, we don't really care
+		if (!sdhc && (Endian::readB32(&cmdBuf[1]) != sizeof(sectorBuf))) {
+			responseQueue.push_back(R1_PARAMETER_ERROR); // only 512-byte blocks
+		} else {
+			// OK: a card out of the idle state answers 00h, and a driver
+			// that sends this command (one for a standard-capacity card)
+			// reads any other answer as a failure
+			responseQueue.push_back(R1_BUSY);
+		}
 		break;
 	case 17: // READ_SINGLE_BLOCK
 	case 18: // READ_MULTIPLE_BLOCK
 	case 24: // WRITE_BLOCK
 	case 25: // WRITE_MULTIPLE_BLOCK
-		// SDHC so the address is the sector
+		// SDHC: the address is the sector; SDSC: a byte address, a
+		// multiple of the sector size
 		currentSector = Endian::readB32(&cmdBuf[1]);
+		if (!sdhc) {
+			if (currentSector % sizeof(sectorBuf)) {
+				responseQueue.push_back(R1_PARAMETER_ERROR);
+				break;
+			}
+			currentSector /= sizeof(sectorBuf);
+		}
 		if (currentSector >= hd->getNbSectors()) {
 			responseQueue.push_back(R1_PARAMETER_ERROR);
 		} else {
@@ -332,7 +394,7 @@ void SdCard::executeCommand()
 	case 58: // READ_OCR
 		responseQueue.push_back({
 			R1_BUSY,// R1 (OK) (ignored on MegaSD, checked in FUZIX)
-			uint8_t(0x40),   // OCR Reg part 1 (SDHC: CCS=1)
+			uint8_t(sdhc ? 0x40 : 0x00), // OCR Reg part 1 (SDHC: CCS=1)
 			uint8_t(0x00),   // OCR Reg part 2
 			uint8_t(0x00),   // OCR Reg part 3
 			uint8_t(0x00)}); // OCR Reg part 4
@@ -358,6 +420,7 @@ void SdCard::serialize(Archive& ar, unsigned /*version*/)
 {
 	ar.serialize("mode",   mode,
 	             "cmdBuf", cmdBuf);
+	// sdhc comes from the configuration, not the state
 	ar.serialize_blob("sectorBuf", sectorBuf.raw);
 	if (hd) ar.serialize("hd", *hd);
 	ar.serialize("cmdIdx",               cmdIdx,

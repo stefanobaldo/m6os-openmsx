@@ -43,6 +43,7 @@ private:
 private:
 	const std::unique_ptr<HD> hd; // can be nullptr
 	DiskManipulator* diskManipulator = nullptr; // set when hd is: the card is reachable as hdX
+	const bool sdhc; // false: a standard-capacity (SDv1) card, addressed by byte
 
 	std::array<uint8_t, 6> cmdBuf;
 	SectorBuffer sectorBuf;

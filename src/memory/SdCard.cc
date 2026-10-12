@@ -43,6 +43,11 @@ SdCard::SdCard(const DeviceConfig& config)
 {
 }
 
+bool SdCard::isWriteProtected() const
+{
+	return hd && hd->isWriteProtected();
+}
+
 SdCard::~SdCard() = default;
 
 // helper methods for 'transfer' to avoid duplication

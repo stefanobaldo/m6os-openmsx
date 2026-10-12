@@ -20,6 +20,7 @@ public:
 	~SdCard();
 
 	uint8_t transfer(uint8_t value, bool cs);
+	[[nodiscard]] bool isWriteProtected() const;
 
 	template<typename Archive>
 	void serialize(Archive& ar, unsigned version);

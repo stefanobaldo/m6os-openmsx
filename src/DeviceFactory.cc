@@ -62,6 +62,7 @@
 #include "SVIFDC.hh"
 #include "YamahaFDC.hh"
 #include "SunriseIDE.hh"
+#include "SDMapperV2.hh"
 #include "BeerIDE.hh"
 #include "GoudaSCSI.hh"
 #include "MegaSCSI.hh"
@@ -248,6 +249,8 @@ std::unique_ptr<MSXDevice> DeviceFactory::create(DeviceConfig& conf)
 		result = std::make_unique<BeerIDE>(conf);
 	} else if (type == "SunriseIDE") {
 		result = std::make_unique<SunriseIDE>(conf);
+	} else if (type == "SDMapperV2") {
+		result = std::make_unique<SDMapperV2>(conf);
 	} else if (type == "GoudaSCSI") {
 		result = std::make_unique<GoudaSCSI>(conf);
 	} else if (type == "MegaSCSI") {

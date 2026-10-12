@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+<!DOCTYPE msxconfig SYSTEM 'msxconfig2.dtd'>
+<msxconfig>
+  <info>
+    <name>SD Mapper V2</name>
+    <manufacturer>FBLabs</manufacturer>
+    <code/>
+    <release_year>2020</release_year>
+    <description>Mass storage cartridge with two SD card slots on an SPI port, an ASCII16 mapper over a 256kB flash holding the Nextor kernel ROM with the FBLabs SDXC driver, and a 512kB memory mapper behind a slot expander (the mapper and the expander are not emulated). ROM: SDXC110.ROM from the v110_212 release.</description>
+    <type>external hard disk</type>
+  </info>
+  <devices>
+    <primary slot="any">
+      <secondary slot="any">
+        <SDMapperV2 id="SD Mapper V2">
+          <mem base="0x4000" size="0x8000"/>
+          <rom>
+            <sha1>54b0d57f52b87af89768e84a2bf612447ce6f719</sha1>
+            <filename>SDXC110.ROM</filename>
+          </rom>
+          <sdcard1>
+            <filename>sdmapperv2_card1.dsk</filename>
+            <size>8</size>
+          </sdcard1>
+          <sdcard2>
+            <filename>sdmapperv2_card2.dsk</filename>
+            <size>8</size>
+          </sdcard2>
+        </SDMapperV2>
+      </secondary>
+    </primary>
+  </devices>
+</msxconfig>

@@ -7,6 +7,7 @@
 #include "SimpleDebuggable.hh"
 #include "narrow.hh"
 #include <array>
+#include <span>
 
 namespace openmsx {
 
@@ -24,6 +25,17 @@ public:
 	[[nodiscard]] unsigned getSizeInBlocks() const {
 		return narrow<unsigned>(checkedRam.size() / 0x4000);
 	}
+
+	/** Access to the mapper's RAM by another device — a cartridge that
+	  * writes a sector into the memory it serves (the m6 block device's
+	  * Turbo mode in SDMapperV2). Addresses are offsets into the RAM
+	  * (segment * 0x4000 + offset), not Z80 addresses; the caller keeps
+	  * them inside getRamBytes(). writeRamBlock invalidates the CPU's
+	  * cache lines of this device afterwards.
+	  */
+	[[nodiscard]] size_t getRamBytes() const { return checkedRam.size(); }
+	[[nodiscard]] uint8_t peekRam(size_t addr) const { return checkedRam.peek(addr); }
+	void writeRamBlock(size_t addr, std::span<const uint8_t> data);
 
 	void reset(EmuTime time) override;
 	void powerUp(EmuTime time) override;

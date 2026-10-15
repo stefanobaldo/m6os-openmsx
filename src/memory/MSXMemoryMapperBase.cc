@@ -1,4 +1,5 @@
 #include "MSXMemoryMapperBase.hh"
+#include "enumerate.hh"
 
 #include "MSXException.hh"
 
@@ -36,6 +37,14 @@ MSXMemoryMapperBase::MSXMemoryMapperBase(const DeviceConfig& config)
 unsigned MSXMemoryMapperBase::getBaseSizeAlignment() const
 {
 	return 0x4000;
+}
+
+void MSXMemoryMapperBase::writeRamBlock(size_t addr, std::span<const uint8_t> data)
+{
+	for (auto [i, b] : enumerate(data)) {
+		checkedRam.write(addr + i, b);
+	}
+	invalidateDeviceRWCache();
 }
 
 void MSXMemoryMapperBase::powerUp(EmuTime time)

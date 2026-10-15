@@ -23,6 +23,18 @@ public:
 	uint8_t transfer(uint8_t value, bool cs);
 	[[nodiscard]] bool isWriteProtected() const;
 
+	/** Whole-sector access beside the SPI protocol, for a cartridge that
+	  * moves sectors itself (the m6 block device's Turbo commands in
+	  * SDMapperV2). A card with no image behind it has no medium; a read
+	  * or write of a sector past the end, or one the image refuses,
+	  * throws MSXException as HD does. The SPI state machine is left as
+	  * it is: a driver uses one path or the other for a call.
+	  */
+	[[nodiscard]] bool hasMedium() const { return hd != nullptr; }
+	[[nodiscard]] size_t getNbSectors() const;
+	void readSector(size_t sector, SectorBuffer& buf);
+	void writeSector(size_t sector, const SectorBuffer& buf);
+
 	template<typename Archive>
 	void serialize(Archive& ar, unsigned version);
 

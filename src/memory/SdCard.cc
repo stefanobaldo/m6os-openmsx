@@ -73,6 +73,23 @@ bool SdCard::isWriteProtected() const
 	return hd && hd->isWriteProtected();
 }
 
+size_t SdCard::getNbSectors() const
+{
+	return hd ? hd->getNbSectors() : 0;
+}
+
+void SdCard::readSector(size_t sector, SectorBuffer& buf)
+{
+	if (!hd) throw MSXException("SD card: no medium");
+	hd->readSector(sector, buf);
+}
+
+void SdCard::writeSector(size_t sector, const SectorBuffer& buf)
+{
+	if (!hd) throw MSXException("SD card: no medium");
+	hd->writeSector(sector, buf);
+}
+
 SdCard::~SdCard()
 {
 	if (diskManipulator) diskManipulator->unregisterDrive(*hd);

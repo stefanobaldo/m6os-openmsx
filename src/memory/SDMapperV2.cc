@@ -3,7 +3,13 @@
 #include "SdCard.hh"
 #include "DeviceConfig.hh"
 #include "MSXException.hh"
+#include "MSXMemoryMapperBase.hh"
+#include "MSXMotherBoard.hh"
+#include "MSXCliComm.hh"
+#include "DiskImageUtils.hh"
+#include "endian.hh"
 #include "serialize.hh"
+#include "serialize_stl.hh"
 
 #include "narrow.hh"
 #include "outer.hh"
@@ -37,6 +43,42 @@ SPI window (bank 7 only):
                  the card shifts out meanwhile is the read's value. The
                  CPLD holds the CPU with WAIT for the eight clocks; that
                  time is not modelled.
+
+The m6 block device (optional, <m6block>; bank 7 only), 7F00h-7F3Fh — the
+reference implementation of the register set m6 publishes for a
+cartridge that moves sectors itself into the memory mapper it serves
+(m6's docs/block-device.md has the semantics; this is its summary):
+  7F00h-7F03h r  "M6BD"
+  7F04h       r  version, 1
+  7F05h       r  capabilities: bit 0 Turbo offered, bit 1 the FAT
+                 accelerator's commands answer (not here), bit 2 reserved,
+                 bits 5-4 the subslot of this cartridge's slot where the
+                 mapper is, bit 7 the device serves a mapper there
+  7F06h       r  devices, 2 (the two card slots)
+  7F07h       w  the device of the next command, 1 or 2
+  7F08h-7F0Bh w  the first sector, little-endian
+  7F0Ch       w  sectors, 1-32
+  7F0Dh       w  the target segment of the mapper
+  7F0Eh       w  the target's 256-byte slot in the segment, 0-62
+  7F0Fh       w  the probe byte
+  7F10h       w  the command: 1 read (card to RAM), 2 write (RAM to card);
+                 the write starts it
+  7F11h       r  80h while the command runs; 00h done; 01h-7Fh an error:
+                 1 the probe byte is not at the target (nothing moved),
+                 2 out of range, 3 the medium failed, 4 no medium, 5 the
+                 card is write-protected, 6 a bad parameter, 7 an unknown
+                 command
+  7F12h-7F15h r  a 32-bit result (unused here)
+  7F16h-7F3Fh w  parameters of other commands (unused here)
+The target is segment * 4000h + slot * 100h of the RAM of the MemoryMapper
+device <mapper> names. Before anything moves the byte there is compared
+with the probe byte. A command completes <turbo_us> microseconds a sector
+after it started (default 50): until then the status reads 80h and, on a
+read, the target still holds its old bytes; at completion a read's data is
+in the RAM and a write's is on the card. Without <mapper> the block offers
+Turbo with no RAM behind it and every command fails the probe — a device
+that lies, for the kernel ROM's boot to refuse. <turbo_subslot> (default
+3) is what the capabilities report.
 */
 
 namespace openmsx {
@@ -55,6 +97,19 @@ SDMapperV2::SDMapperV2(DeviceConfig& config)
 		cardDeclared[i] = child != nullptr;
 		sdCard[i] = std::make_unique<SdCard>(DeviceConfig(config, child));
 	}
+	if (auto* block = config.findChild("m6block")) {
+		DeviceConfig bc(config, block);
+		blockPresent = true;
+		mapperName = std::string(bc.getChildData("mapper", ""));
+		int sub = bc.getChildDataAsInt("turbo_subslot", 3);
+		if ((sub < 0) || (sub > 3)) {
+			throw MSXException("m6block: turbo_subslot must be 0-3, got ", sub);
+		}
+		blockSubslot = narrow<uint8_t>(sub);
+		int us = bc.getChildDataAsInt("turbo_us", 50);
+		if (us < 0) throw MSXException("m6block: turbo_us must not be negative");
+		turboUs = unsigned(us);
+	}
 	reset(getCurrentTime());
 }
 
@@ -67,7 +122,153 @@ void SDMapperV2::reset(EmuTime time)
 	cardSelect = 0;
 	timerValue = 0;
 	timerStart = time;
+	bdReg.fill(0);
+	bdStatus = 0;
+	bdPending = 0;
+	bdResult = 0;
+	bdBusy = false;
+	bdDone = time;
+	bdBuffer.clear();
 	invalidateDeviceRCache(0x4000, 0x8000);
+}
+
+// The m6 block device.
+
+static constexpr uint8_t BDC_TURBO  = 0x01;
+static constexpr uint8_t BDC_MAPPER = 0x80;
+static constexpr uint8_t BDO_READ   = 1;
+static constexpr uint8_t BDO_WRITE  = 2;
+static constexpr uint8_t BDE_PROBE    = 1;
+static constexpr uint8_t BDE_RANGE    = 2;
+static constexpr uint8_t BDE_IO       = 3;
+static constexpr uint8_t BDE_NOMEDIUM = 4;
+static constexpr uint8_t BDE_RO       = 5;
+static constexpr uint8_t BDE_PARAM    = 6;
+static constexpr uint8_t BDE_CMD      = 7;
+static constexpr uint8_t BD_BUSY      = 0x80;
+
+MSXMemoryMapperBase* SDMapperV2::findMapper()
+{
+	if (!mapperLooked) {
+		mapperLooked = true;
+		if (!mapperName.empty()) {
+			mapper = dynamic_cast<MSXMemoryMapperBase*>(
+				getMotherBoard().findDevice(mapperName));
+			if (!mapper) {
+				getCliComm().printWarning(
+					"SD Mapper V2 m6block: no memory mapper named \"",
+					mapperName, "\": every Turbo command will fail its probe");
+			}
+		}
+	}
+	return mapper;
+}
+
+// A read of the status brings the running command to its end once its
+// time has come: a read's data into the mapper's RAM, the result in.
+void SDMapperV2::settleCommand(EmuTime time)
+{
+	if (!bdBusy || (time < bdDone)) return;
+	bdBusy = false;
+	if ((bdPending == 0) && !bdBuffer.empty()) {
+		if (auto* m = findMapper()) {
+			m->writeRamBlock(bdTarget, bdBuffer);
+		}
+	}
+	bdBuffer.clear();
+	bdStatus = bdPending;
+}
+
+void SDMapperV2::startCommand(EmuTime time)
+{
+	uint8_t cmd = bdReg[0x10];
+	auto fail = [&](uint8_t code) {
+		bdBusy = false;
+		bdBuffer.clear();
+		bdStatus = code;
+	};
+	if ((cmd != BDO_READ) && (cmd != BDO_WRITE)) { fail(BDE_CMD); return; }
+	unsigned dev = bdReg[0x07];
+	unsigned count = bdReg[0x0C];
+	unsigned slot = bdReg[0x0E];
+	if ((dev < 1) || (dev > 2) || (count < 1) || (count > 32) ||
+	    (slot + 2 * count > 64)) { fail(BDE_PARAM); return; }
+	auto& card = *sdCard[dev - 1];
+	if (!cardDeclared[dev - 1] || !card.hasMedium()) { fail(BDE_NOMEDIUM); return; }
+	uint32_t lba = Endian::read_UA_L32(&bdReg[0x08]);
+	if (uint64_t(lba) + count > card.getNbSectors()) { fail(BDE_RANGE); return; }
+	if ((cmd == BDO_WRITE) && card.isWriteProtected()) { fail(BDE_RO); return; }
+	auto* m = findMapper();
+	size_t target = size_t(bdReg[0x0D]) * 0x4000 + size_t(slot) * 0x100;
+	size_t len = size_t(count) * 512;
+	if (!m || (target + len > m->getRamBytes())) { fail(BDE_PROBE); return; }
+	if (m->peekRam(target) != bdReg[0x0F]) { fail(BDE_PROBE); return; }
+
+	bdPending = 0;
+	bdBuffer.clear();
+	bdTarget = narrow<uint32_t>(target);
+	try {
+		if (cmd == BDO_READ) {
+			bdBuffer.resize(len);
+			SectorBuffer buf;
+			for (unsigned i = 0; i < count; ++i) {
+				card.readSector(lba + i, buf);
+				std::copy(buf.raw.begin(), buf.raw.end(), bdBuffer.begin() + i * 512);
+			}
+		} else {
+			SectorBuffer buf;
+			for (unsigned i = 0; i < count; ++i) {
+				for (unsigned j = 0; j < 512; ++j) {
+					buf.raw[j] = m->peekRam(target + i * 512 + j);
+				}
+				card.writeSector(lba + i, buf);
+			}
+		}
+	} catch (MSXException&) {
+		bdPending = BDE_IO;
+		bdBuffer.clear();
+	}
+	bdBusy = true;
+	bdStatus = BD_BUSY;
+	bdDone = time + EmuDuration::usec(turboUs * count);
+}
+
+uint8_t SDMapperV2::readBlock(uint16_t address, EmuTime time)
+{
+	unsigned r = address & 0x3F;
+	if (r == 0x11) {
+		settleCommand(time);
+		return bdBusy ? BD_BUSY : bdStatus;
+	}
+	return peekBlock(address, time);
+}
+
+uint8_t SDMapperV2::peekBlock(uint16_t address, EmuTime time) const
+{
+	unsigned r = address & 0x3F;
+	switch (r) {
+	case 0x00: return 'M';
+	case 0x01: return '6';
+	case 0x02: return 'B';
+	case 0x03: return 'D';
+	case 0x04: return 1;
+	case 0x05: return uint8_t(BDC_TURBO | BDC_MAPPER | (blockSubslot << 4));
+	case 0x06: return 2;
+	case 0x11: return (bdBusy && (time < bdDone)) ? BD_BUSY : (bdBusy ? bdPending : bdStatus);
+	case 0x12: return narrow_cast<uint8_t>(bdResult >>  0);
+	case 0x13: return narrow_cast<uint8_t>(bdResult >>  8);
+	case 0x14: return narrow_cast<uint8_t>(bdResult >> 16);
+	case 0x15: return narrow_cast<uint8_t>(bdResult >> 24);
+	default:   return bdReg[r];
+	}
+}
+
+void SDMapperV2::writeBlock(uint16_t address, uint8_t value, EmuTime time)
+{
+	unsigned r = address & 0x3F;
+	if ((r < 0x07) || ((0x11 <= r) && (r <= 0x15))) return; // read-only
+	bdReg[r] = value;
+	if (r == 0x10) startCommand(time);
 }
 
 uint8_t SDMapperV2::spiTransfer(uint8_t value)
@@ -114,6 +315,7 @@ uint8_t SDMapperV2::readMem(uint16_t address, EmuTime time)
 		if (spiVisible() && (0x7B00 <= address) && (address < 0x7F00)) {
 			return spiTransfer(0xFF);
 		}
+		if (blockVisible(address)) return readBlock(address, time);
 		if (address == 0x7FF0) return readStatus();
 		if (address == 0x7FF1) return readTimer(time);
 		if (address >= 0x7FF2) return 0xFF;
@@ -134,6 +336,7 @@ uint8_t SDMapperV2::peekMem(uint16_t address, EmuTime time) const
 		if (spiVisible() && (0x7B00 <= address) && (address < 0x7F00)) {
 			return 0xFF; // a transfer cannot be peeked
 		}
+		if (blockVisible(address)) return peekBlock(address, time);
 		if (address == 0x7FF0) return readStatus();
 		if (address == 0x7FF1) return readTimer(time);
 		if (address >= 0x7FF2) return 0xFF;
@@ -183,6 +386,10 @@ void SDMapperV2::writeMem(uint16_t address, uint8_t value, EmuTime time)
 		(void)spiTransfer(value);
 		return;
 	}
+	if (blockVisible(address)) {
+		writeBlock(address, value, time);
+		return;
+	}
 	if (address == 0x7FF0) {
 		cardSelect = value & 0x03;
 		return;
@@ -205,7 +412,15 @@ void SDMapperV2::serialize(Archive& ar, unsigned /*version*/)
 	             "timerValue", timerValue,
 	             "bank1",      bank1,
 	             "bank2",      bank2,
-	             "cardSelect", cardSelect);
+	             "cardSelect", cardSelect,
+	             "bdReg",      bdReg,
+	             "bdStatus",   bdStatus,
+	             "bdPending",  bdPending,
+	             "bdResult",   bdResult,
+	             "bdBusy",     bdBusy,
+	             "bdDone",     bdDone,
+	             "bdBuffer",   bdBuffer,
+	             "bdTarget",   bdTarget);
 	if constexpr (Archive::IS_LOADER) {
 		invalidateDeviceRCache(0x4000, 0x8000);
 	}

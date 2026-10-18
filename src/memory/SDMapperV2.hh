@@ -4,6 +4,7 @@
 #include "MSXDevice.hh"
 #include "Rom.hh"
 #include "RomBlockDebuggable.hh"
+#include "SimpleDebuggable.hh"
 #include "EmuTime.hh"
 
 #include <array>
@@ -55,7 +56,9 @@ private:
 	[[nodiscard]] uint8_t peekBlock(uint16_t address, EmuTime time) const;
 	void writeBlock(uint16_t address, uint8_t value, EmuTime time);
 	void startCommand(EmuTime time);
+	void fatCommand(uint8_t cmd, EmuTime time);
 	void settleCommand(EmuTime time);
+	[[nodiscard]] uint8_t capabilities() const;
 	[[nodiscard]] MSXMemoryMapperBase* findMapper();
 
 private:
@@ -63,6 +66,14 @@ private:
 		explicit Blocks(const SDMapperV2& device);
 		[[nodiscard]] unsigned readExt(unsigned address) override;
 	} romBlockDebug;
+	/** The block's registers as the CPU would peek them (00h-3Fh), then
+	  * the commands started since power-on: FAT accelerator commands
+	  * (40h-43h) and Turbo commands (44h-47h), little-endian — for a test
+	  * script to tell which path the kernel took. */
+	struct BlockDebuggable final : SimpleDebuggable {
+		explicit BlockDebuggable(const SDMapperV2& device);
+		[[nodiscard]] uint8_t read(unsigned address, EmuTime time) override;
+	} blockDebug;
 
 	Rom rom;
 	std::array<std::unique_ptr<SdCard>, 2> sdCard;
@@ -77,6 +88,7 @@ private:
 	bool blockPresent = false;
 	uint8_t blockSubslot = 3;     // BD_CAPS bits 5-4: where the mapper is
 	unsigned turboUs = 50;        // modelled time a sector takes
+	bool turboOffered = true;     // <turbo>: false = the accelerator alone
 	std::string mapperName;       // the MemoryMapper device the commands write; "" = none (a device that offers Turbo with no RAM)
 	MSXMemoryMapperBase* mapper = nullptr; // resolved at the first command
 	bool mapperLooked = false;
@@ -84,10 +96,13 @@ private:
 	uint8_t bdStatus = 0;         // BD_STAT once the command is done
 	uint8_t bdPending = 0;        // the status a running command will end with
 	uint32_t bdResult = 0;        // BD_RES
+	uint32_t bdPendingResult = 0; // the result a running command will end with
 	bool bdBusy = false;
 	EmuTime bdDone = EmuTime::zero();
 	std::vector<uint8_t> bdBuffer; // a read's data, applied at completion
 	uint32_t bdTarget = 0;        // its address in the mapper's RAM
+	uint32_t fatCommands = 0;     // statistics, for the debuggable
+	uint32_t turboCommands = 0;
 };
 
 } // namespace openmsx

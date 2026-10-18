@@ -9,7 +9,9 @@ card), written for the test harness of
 device (`<m6block>`), the reference implementation of m6's block device
 register set, through which a cartridge that is itself the machine's
 memory mapper moves sectors into that RAM — m6's Turbo transfer mode —
-writing into a `MemoryMapper` device of the same extension.
+writing into a `MemoryMapper` device of the same extension, and answers
+the two FAT accelerator commands (a count of free clusters, the next
+free cluster) on a FAT12, FAT16 or FAT32 table on its card.
 Releases tagged `m6-21.0.N` carry a Linux x86_64 build and a macOS
 Apple-silicon disk image; the binary reports its version as `21.0-m6.N`.
 
